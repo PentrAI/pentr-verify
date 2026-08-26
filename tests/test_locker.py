@@ -75,3 +75,28 @@ def test_directory_locker_rejects_traversal_members(tmp_path):
     with pytest.raises(locker_mod.LockerFormatError) as exc:
         lk.read("artifacts/../../etc/passwd")
     assert "artifacts/../../etc/passwd" in str(exc.value)
+
+
+def test_verify_report_to_dict_is_json_serializable():
+    import json as _json
+
+    report = locker_mod.VerifyReport(
+        ok=False, pinned=True, key_id="ab" * 32, run_id="run-1",
+        chain_head="cd" * 32, entry_count=1, signed_at="2026-08-26T00:00:00+00:00",
+        entries=[locker_mod.EntryResult(seq=0, sha256="ef" * 32, kind="command_log",
+                                        filename=None, ok=False, reason="hash mismatch")],
+        failures=[locker_mod.Failure(code="blob_hash_mismatch", message="bad",
+                                     subject="ef" * 32)],
+    )
+    payload = _json.loads(_json.dumps(report.to_dict()))
+
+    assert payload["ok"] is False
+    assert payload["pinned"] is True
+    assert payload["entries"][0]["seq"] == 0
+    assert payload["failures"][0]["code"] == "blob_hash_mismatch"
+
+
+def test_all_failure_codes_are_registered():
+    assert "blob_hash_mismatch" in locker_mod.FAILURE_CODES
+    assert "unlisted_blob" in locker_mod.FAILURE_CODES
+    assert "key_not_pinned_match" in locker_mod.FAILURE_CODES

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # The locker *packaging* format version, independent of core.manifest.VERSION
@@ -53,6 +54,76 @@ class LockerFormatError(Exception):
     Distinct from a verification failure: this is "you gave me something that
     is not a locker", which the CLI reports as exit 2, not as tampering.
     """
+
+
+FAILURE_CODES = frozenset({
+    "unknown_format",
+    "unsupported_algorithm",
+    "manifest_binding_mismatch",
+    "key_id_mismatch",
+    "key_not_pinned_match",
+    "signature_invalid",
+    "genesis_mismatch",
+    "entry_hash_mismatch",
+    "chain_head_mismatch",
+    "blob_missing",
+    "blob_hash_mismatch",
+    "blob_size_mismatch",
+    "unlisted_blob",
+    "seal_claim_mismatch",
+})
+
+
+@dataclass
+class Failure:
+    code: str
+    message: str
+    subject: str | None = None
+
+    def to_dict(self) -> dict:
+        return {"code": self.code, "message": self.message, "subject": self.subject}
+
+
+@dataclass
+class EntryResult:
+    seq: int
+    sha256: str
+    kind: str
+    filename: str | None
+    ok: bool
+    reason: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "seq": self.seq, "sha256": self.sha256, "kind": self.kind,
+            "filename": self.filename, "ok": self.ok, "reason": self.reason,
+        }
+
+
+@dataclass
+class VerifyReport:
+    ok: bool
+    pinned: bool
+    key_id: str | None = None
+    run_id: str | None = None
+    chain_head: str | None = None
+    entry_count: int = 0
+    signed_at: str | None = None
+    entries: list[EntryResult] = field(default_factory=list)
+    failures: list[Failure] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "ok": self.ok,
+            "pinned": self.pinned,
+            "key_id": self.key_id,
+            "run_id": self.run_id,
+            "chain_head": self.chain_head,
+            "entry_count": self.entry_count,
+            "signed_at": self.signed_at,
+            "entries": [e.to_dict() for e in self.entries],
+            "failures": [f.to_dict() for f in self.failures],
+        }
 
 
 class Locker:
