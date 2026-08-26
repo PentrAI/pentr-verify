@@ -369,5 +369,96 @@ def verify_locker(locker: Locker, *,
         ))
         return report
 
-    report.ok = True
+    # --- Stage 7: recompute the chain from the manifest's own entries ---
+    # Recompute, never trust. A valid signature already implies the manifest is
+    # unmodified, so this catches a *self-inconsistent* manifest — and, more to
+    # the point, it is the step that proves the shipped chain algorithm
+    # reproduces the sealed head, which is what an auditor is actually checking.
+    raw_entries = manifest.get("entries") or []
+    inputs = [
+        EntryInput(
+            seq=e["seq"], kind=e["kind"], phase=e["phase"], size=e["size"],
+            sha256=e["sha256"], control_ids=list(e.get("control_ids") or []),
+            finding_ids=list(e.get("finding_ids") or []),
+            filename=e.get("filename"), created_at=e["created_at"],
+        )
+        for e in raw_entries
+    ]
+    recomputed, recomputed_head = hash_chain.compute_chain(
+        str(run.get("engagement_id")), inputs
+    )
+    for e, h in zip(raw_entries, recomputed):
+        if e.get("entry_hash") != h:
+            report.failures.append(Failure(
+                "entry_hash_mismatch",
+                f"entry {e['seq']} records hash {e.get('entry_hash')} but recomputes "
+                f"to {h}",
+                e["sha256"],
+            ))
+    if recomputed_head != manifest.get("chain_head"):
+        report.failures.append(Failure(
+            "chain_head_mismatch",
+            f"manifest records chain head {manifest.get('chain_head')} but the chain "
+            f"recomputes to {recomputed_head}",
+            MANIFEST_NAME,
+        ))
+
+    # --- Stage 8: every entry's blob must be present and hash correctly ---
+    present = locker.list_artifact_names()
+    for e in raw_entries:
+        sha = e["sha256"]
+        result = EntryResult(seq=e["seq"], sha256=sha, kind=e["kind"],
+                             filename=e.get("filename"), ok=True)
+        if sha not in present:
+            result.ok, result.reason = False, "blob missing from locker"
+            report.failures.append(Failure(
+                "blob_missing", f"artifacts/{sha} is listed in the manifest but "
+                                f"absent from the locker", sha))
+        else:
+            data = locker.read_artifact(sha)
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != sha:
+                result.ok, result.reason = False, "content does not match its hash"
+                report.failures.append(Failure(
+                    "blob_hash_mismatch",
+                    f"artifacts/{sha} hashes to {actual} — the evidence has been "
+                    f"modified", sha))
+            elif len(data) != e["size"]:
+                result.ok, result.reason = False, "size does not match the manifest"
+                report.failures.append(Failure(
+                    "blob_size_mismatch",
+                    f"artifacts/{sha} is {len(data)} bytes, manifest says {e['size']}",
+                    sha))
+        report.entries.append(result)
+
+    # --- Stage 9: nothing may be present that the manifest does not list ---
+    # "Evidence present but not sealed" is the smuggling case this locker exists
+    # to prevent, so an extra blob is a hard failure, not a warning.
+    listed = {e["sha256"] for e in raw_entries}
+    for extra in sorted(present - listed):
+        report.failures.append(Failure(
+            "unlisted_blob",
+            f"artifacts/{extra} is present in the locker but is not sealed in the "
+            f"manifest", extra))
+
+    # --- Stage 10: seal.json is an unsigned header; every claim is cross-checked ---
+    claims = [
+        ("run_id", seal.get("run_id"), str(run.get("engagement_id"))),
+        ("chain_head", seal.get("chain_head"), manifest.get("chain_head")),
+        ("manifest_sha256", seal.get("manifest_sha256"), manifest_sha256_actual),
+        ("entry_count", seal.get("entry_count"), len(raw_entries)),
+        ("algorithm", seal.get("algorithm"), manifest.get("algorithm")),
+        ("signature_algorithm", seal.get("signature_algorithm"),
+         block.get("algorithm")),
+        ("signing_key_id", seal.get("signing_key_id"), block.get("key_id")),
+        ("signed_at", seal.get("signed_at"), block.get("signed_at")),
+    ]
+    for name, claimed, actual_value in claims:
+        if claimed != actual_value:
+            report.failures.append(Failure(
+                "seal_claim_mismatch",
+                f"{SEAL_NAME} claims {name}={claimed!r} but the signed material says "
+                f"{actual_value!r}", SEAL_NAME))
+
+    report.ok = not report.failures
     return report

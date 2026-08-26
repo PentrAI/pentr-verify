@@ -210,3 +210,91 @@ def test_genesis_mismatch_fails(good_locker, locker_material):
 
     assert report.ok is False
     assert [f.code for f in report.failures] == ["genesis_mismatch"]
+
+
+def test_report_lists_every_entry_on_success(good_locker):
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is True
+    assert [e.seq for e in report.entries] == [0, 1]
+    assert all(e.ok for e in report.entries)
+
+
+def test_mutated_blob_byte_fails_naming_the_artifact(good_locker, locker_material):
+    sha = next(iter(locker_material["blobs"]))
+    original = (good_locker / "artifacts" / sha).read_bytes()
+    (good_locker / "artifacts" / sha).write_bytes(original + b"!")
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    codes = {f.code for f in report.failures}
+    assert "blob_hash_mismatch" in codes or "blob_size_mismatch" in codes
+    assert any(f.subject == sha for f in report.failures)
+    assert any(e.sha256 == sha and not e.ok for e in report.entries)
+
+
+def test_deleted_blob_fails(good_locker, locker_material):
+    sha = next(iter(locker_material["blobs"]))
+    (good_locker / "artifacts" / sha).unlink()
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert any(f.code == "blob_missing" and f.subject == sha for f in report.failures)
+
+
+def test_extra_unlisted_blob_fails(good_locker):
+    smuggled = b"not sealed"
+    sha = hashlib.sha256(smuggled).hexdigest()
+    (good_locker / "artifacts" / sha).write_bytes(smuggled)
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert any(f.code == "unlisted_blob" and f.subject == sha for f in report.failures)
+
+
+def test_edited_chain_head_with_valid_signature_fails(good_locker, locker_material):
+    """Re-sign a manifest whose chain_head was edited: only recomputation catches it."""
+    doc = json.loads(locker_material["manifest_bytes"])
+    doc["chain_head"] = "00" * 32
+    new_bytes = json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":")).encode()
+    new_sha = hashlib.sha256(new_bytes).hexdigest()
+    block = signing.signature_block(
+        chain_head=doc["chain_head"], manifest_sha256=new_sha,
+        key_id=locker_material["key_id"], signed_at=locker_material["seal"]["signed_at"],
+    )
+    sig = signing.SoftwareSigner(locker_material["private_raw"],
+                                 locker_material["key_id"]).sign(block)
+    (good_locker / "manifest.json").write_bytes(new_bytes)
+    (good_locker / "signature_block.json").write_bytes(block)
+    (good_locker / "signature.bin").write_bytes(sig)
+    seal = dict(locker_material["seal"], manifest_sha256=new_sha,
+                chain_head=doc["chain_head"])
+    (good_locker / "seal.json").write_bytes(json.dumps(seal).encode())
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert any(f.code == "chain_head_mismatch" for f in report.failures)
+
+
+def test_seal_claim_disagreeing_with_manifest_fails(good_locker, locker_material):
+    seal = dict(locker_material["seal"], entry_count=99)
+    (good_locker / "seal.json").write_bytes(json.dumps(seal).encode())
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert any(f.code == "seal_claim_mismatch" for f in report.failures)
+
+
+def test_directory_and_zip_produce_identical_reports(good_locker, tmp_path):
+    zpath = _zip_from_dir(good_locker, tmp_path / "locker.zip")
+
+    dir_report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+    zip_report = locker_mod.verify_locker(locker_mod.open_locker(zpath))
+
+    assert dir_report.to_dict() == zip_report.to_dict()
