@@ -8,10 +8,15 @@ mean something: the verifier cannot drift from the sealer.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from core import hash_chain, manifest as manifest_mod, signing
+from core.hash_chain import EntryInput
 
 # The locker *packaging* format version, independent of core.manifest.VERSION
 # and core.signing.SIGNATURE_VERSION even though all three read "pentr-locker-1"
@@ -208,3 +213,161 @@ def open_locker(path: str | Path) -> Locker:
     if p.is_file():
         return _ZipLocker(p)
     raise LockerFormatError(f"no such locker: {p}")
+
+
+def _load_public_key(pem_bytes: bytes) -> bytes:
+    """PEM -> raw 32-byte Ed25519 public key."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    try:
+        key = serialization.load_pem_public_key(pem_bytes)
+    except Exception as exc:
+        raise LockerFormatError(f"unreadable {PUBLIC_KEY_NAME}: {exc}") from exc
+    if not isinstance(key, Ed25519PublicKey):
+        raise LockerFormatError("only Ed25519 public keys are supported")
+    return key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+
+def _parse_json(raw: bytes, name: str) -> dict:
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise LockerFormatError(f"{name} is not valid JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise LockerFormatError(f"{name} must be a JSON object")
+    return doc
+
+
+def verify_locker(locker: Locker, *,
+                  pinned_public_key: bytes | None = None) -> VerifyReport:
+    """Verify an exported locker offline. Never raises on tamper — returns a report.
+
+    Raises LockerFormatError only when the input is not a readable locker at all
+    (missing files, bad JSON, unparseable key). That distinction is what lets the
+    CLI say "you gave me a broken path" (exit 2) rather than reporting tampering
+    (exit 1) for an operator error.
+
+    Stages short-circuit: if the signature does not verify there is no value in
+    enumerating a hundred blobs, so the report names the signature failure and
+    stops.
+    """
+    report = VerifyReport(ok=False, pinned=pinned_public_key is not None)
+
+    # --- Stage 1: seal.json + format ---
+    seal = _parse_json(locker.read(SEAL_NAME), SEAL_NAME)
+    report.run_id = seal.get("run_id")
+    report.signed_at = seal.get("signed_at")
+    if seal.get("format") != LOCKER_FORMAT:
+        report.failures.append(Failure(
+            "unknown_format",
+            f"locker format {seal.get('format')!r} is not {LOCKER_FORMAT!r}",
+            SEAL_NAME,
+        ))
+        return report
+
+    # --- Stage 2: manifest bytes, verbatim, hashed as read ---
+    manifest_bytes = locker.read(MANIFEST_NAME)
+    manifest_sha256_actual = hashlib.sha256(manifest_bytes).hexdigest()
+    manifest = _parse_json(manifest_bytes, MANIFEST_NAME)
+    report.chain_head = manifest.get("chain_head")
+    report.entry_count = len(manifest.get("entries") or [])
+
+    if manifest.get("version") != manifest_mod.VERSION:
+        report.failures.append(Failure(
+            "unknown_format",
+            f"manifest version {manifest.get('version')!r} is not "
+            f"{manifest_mod.VERSION!r}",
+            MANIFEST_NAME,
+        ))
+        return report
+    if manifest.get("algorithm") != manifest_mod.ALGORITHM:
+        # A future merkle-v1 locker must fail loudly on an old verifier rather
+        # than be checked with the wrong rules and reported as sound.
+        report.failures.append(Failure(
+            "unsupported_algorithm",
+            f"manifest algorithm {manifest.get('algorithm')!r} is not supported by "
+            f"this version of pentr-verify (expected {manifest_mod.ALGORITHM!r})",
+            MANIFEST_NAME,
+        ))
+        return report
+
+    # --- Stage 3: the signature block must bind THESE manifest bytes ---
+    block_bytes = locker.read(SIGNATURE_BLOCK_NAME)
+    block = _parse_json(block_bytes, SIGNATURE_BLOCK_NAME)
+    report.key_id = block.get("key_id")
+    report.signed_at = block.get("signed_at") or report.signed_at
+
+    if (block.get("version") != signing.SIGNATURE_VERSION
+            or block.get("algorithm") != signing.SIGNATURE_ALGORITHM):
+        report.failures.append(Failure(
+            "unknown_format",
+            f"signature block is {block.get('version')!r}/{block.get('algorithm')!r}, "
+            f"expected {signing.SIGNATURE_VERSION!r}/{signing.SIGNATURE_ALGORITHM!r}",
+            SIGNATURE_BLOCK_NAME,
+        ))
+        return report
+    if block.get("manifest_sha256") != manifest_sha256_actual:
+        report.failures.append(Failure(
+            "manifest_binding_mismatch",
+            f"signature covers manifest {block.get('manifest_sha256')} but this "
+            f"locker's manifest hashes to {manifest_sha256_actual}",
+            MANIFEST_NAME,
+        ))
+        return report
+    if block.get("chain_head") != manifest.get("chain_head"):
+        report.failures.append(Failure(
+            "manifest_binding_mismatch",
+            f"signature covers chain head {block.get('chain_head')} but the manifest "
+            f"records {manifest.get('chain_head')}",
+            SIGNATURE_BLOCK_NAME,
+        ))
+        return report
+
+    # --- Stage 4: key identity (content-derived, so it self-verifies) ---
+    public_raw = _load_public_key(locker.read(PUBLIC_KEY_NAME))
+    derived_key_id = signing.key_id_for(public_raw)
+    if derived_key_id != block.get("key_id"):
+        report.failures.append(Failure(
+            "key_id_mismatch",
+            f"{PUBLIC_KEY_NAME} has key id {derived_key_id} but the signature block "
+            f"names {block.get('key_id')}",
+            PUBLIC_KEY_NAME,
+        ))
+        return report
+    if pinned_public_key is not None and pinned_public_key != public_raw:
+        report.failures.append(Failure(
+            "key_not_pinned_match",
+            f"locker is signed by key {derived_key_id} but you pinned "
+            f"{signing.key_id_for(pinned_public_key)}",
+            PUBLIC_KEY_NAME,
+        ))
+        return report
+
+    # --- Stage 5: the signature itself ---
+    signature = locker.read(SIGNATURE_NAME)
+    if not signing.verify_signature(public_raw, block_bytes, signature):
+        report.failures.append(Failure(
+            "signature_invalid",
+            f"signature does not verify against key {derived_key_id}",
+            SIGNATURE_NAME,
+        ))
+        return report
+
+    # --- Stage 6: genesis binds the run id (anti cross-run splicing) ---
+    run = manifest.get("run") or {}
+    expected_genesis = hash_chain.genesis(str(run.get("engagement_id")))
+    if expected_genesis != manifest.get("genesis"):
+        report.failures.append(Failure(
+            "genesis_mismatch",
+            f"manifest genesis {manifest.get('genesis')} does not match the genesis "
+            f"derived from run {run.get('engagement_id')}",
+            MANIFEST_NAME,
+        ))
+        return report
+
+    report.ok = True
+    return report

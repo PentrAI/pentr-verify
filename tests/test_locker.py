@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import zipfile
 
 import pytest
 
-from core import locker as locker_mod
+from core import hash_chain, locker as locker_mod, signing
 from tests.conftest import _write_dir_locker, _zip_from_dir
 
 
@@ -100,3 +101,112 @@ def test_all_failure_codes_are_registered():
     assert "blob_hash_mismatch" in locker_mod.FAILURE_CODES
     assert "unlisted_blob" in locker_mod.FAILURE_CODES
     assert "key_not_pinned_match" in locker_mod.FAILURE_CODES
+
+
+def test_good_locker_verifies_unpinned(good_locker, locker_material):
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is True
+    assert report.pinned is False
+    assert report.key_id == locker_material["key_id"]
+    assert report.chain_head == locker_material["chain_head"]
+    assert report.failures == []
+
+
+def test_good_locker_verifies_pinned(good_locker, locker_material):
+    report = locker_mod.verify_locker(
+        locker_mod.open_locker(good_locker),
+        pinned_public_key=locker_material["public_raw"],
+    )
+
+    assert report.ok is True
+    assert report.pinned is True
+
+
+def test_wrong_pinned_key_fails(good_locker):
+    other = signing.raw_public_key_from_private(signing.generate_private_key())
+
+    report = locker_mod.verify_locker(
+        locker_mod.open_locker(good_locker), pinned_public_key=other
+    )
+
+    assert report.ok is False
+    assert [f.code for f in report.failures] == ["key_not_pinned_match"]
+
+
+def test_foreign_public_key_in_locker_fails_key_id(good_locker):
+    other_raw = signing.raw_public_key_from_private(signing.generate_private_key())
+    (good_locker / "public_key.pem").write_text(signing.public_key_pem(other_raw))
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert [f.code for f in report.failures] == ["key_id_mismatch"]
+
+
+def test_edited_manifest_fails_binding(good_locker, locker_material):
+    doc = json.loads(locker_material["manifest_bytes"])
+    doc["run"]["framework"] = "hipaa"
+    (good_locker / "manifest.json").write_bytes(json.dumps(doc).encode())
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert [f.code for f in report.failures] == ["manifest_binding_mismatch"]
+
+
+def test_tampered_signature_fails(good_locker, locker_material):
+    bad = bytearray(locker_material["signature"])
+    bad[0] ^= 0xFF
+    (good_locker / "signature.bin").write_bytes(bytes(bad))
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert [f.code for f in report.failures] == ["signature_invalid"]
+
+
+def test_unknown_format_fails(good_locker, locker_material):
+    seal = dict(locker_material["seal"], format="pentr-locker-99")
+    (good_locker / "seal.json").write_bytes(json.dumps(seal).encode())
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert [f.code for f in report.failures] == ["unknown_format"]
+
+
+def test_unsupported_algorithm_fails(good_locker, locker_material):
+    doc = json.loads(locker_material["manifest_bytes"])
+    doc["algorithm"] = "merkle-v1"
+    (good_locker / "manifest.json").write_bytes(json.dumps(doc).encode())
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert report.failures[0].code == "unsupported_algorithm"
+
+
+def test_genesis_mismatch_fails(good_locker, locker_material):
+    """A manifest spliced from another run: re-sign it so only genesis is wrong."""
+    doc = json.loads(locker_material["manifest_bytes"])
+    doc["genesis"] = hash_chain.genesis("22222222-2222-2222-2222-222222222222")
+    new_bytes = json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":")).encode()
+    new_sha = hashlib.sha256(new_bytes).hexdigest()
+    block = signing.signature_block(
+        chain_head=doc["chain_head"], manifest_sha256=new_sha,
+        key_id=locker_material["key_id"], signed_at=locker_material["seal"]["signed_at"],
+    )
+    sig = signing.SoftwareSigner(locker_material["private_raw"],
+                                 locker_material["key_id"]).sign(block)
+    (good_locker / "manifest.json").write_bytes(new_bytes)
+    (good_locker / "signature_block.json").write_bytes(block)
+    (good_locker / "signature.bin").write_bytes(sig)
+    seal = dict(locker_material["seal"], manifest_sha256=new_sha)
+    (good_locker / "seal.json").write_bytes(json.dumps(seal).encode())
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    assert [f.code for f in report.failures] == ["genesis_mismatch"]
