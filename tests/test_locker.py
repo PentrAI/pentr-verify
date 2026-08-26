@@ -208,10 +208,32 @@ def test_verify_report_to_dict_is_json_serializable():
     assert payload["failures"][0]["code"] == "blob_hash_mismatch"
 
 
-def test_all_failure_codes_are_registered():
-    assert "blob_hash_mismatch" in locker_mod.FAILURE_CODES
-    assert "unlisted_blob" in locker_mod.FAILURE_CODES
-    assert "key_not_pinned_match" in locker_mod.FAILURE_CODES
+def test_failure_codes_are_the_frozen_wire_contract():
+    """Assert the whole set, not a sample: Phase 5's viewer and any `--json`
+    consumer switch on these slugs, so a rename or a drop must break the build."""
+    assert locker_mod.FAILURE_CODES == frozenset({
+        "unknown_format",
+        "unsupported_algorithm",
+        "manifest_binding_mismatch",
+        "key_id_mismatch",
+        "key_not_pinned_match",
+        "signature_invalid",
+        "genesis_mismatch",
+        "entry_hash_mismatch",
+        "chain_head_mismatch",
+        "blob_missing",
+        "blob_hash_mismatch",
+        "blob_size_mismatch",
+        "unlisted_blob",
+        "seal_claim_mismatch",
+    })
+
+
+def test_failure_rejects_an_unregistered_code():
+    """The contract is enforced in production code, not just asserted in a
+    test, so an invented code cannot ship silently in `--json` output."""
+    with pytest.raises(AssertionError):
+        locker_mod.Failure("blob_hash_mismtach", "typo")
 
 
 def test_good_locker_verifies_unpinned(good_locker, locker_material):
@@ -392,6 +414,44 @@ def test_edited_chain_head_with_valid_signature_fails(good_locker, locker_materi
     assert any(f.code == "chain_head_mismatch" for f in report.failures)
 
 
+def test_edited_entry_hash_with_valid_signature_fails(good_locker, locker_material):
+    """Stage 7's per-entry check is independently reachable: editing one entry's
+    stored `entry_hash` does not perturb `compute_chain`, so the recomputed head
+    still matches and only `entry_hash_mismatch` catches it. Re-signed with a
+    fresh keypair so stages 1-6 genuinely pass."""
+    doc = json.loads(locker_material["manifest_bytes"])
+    doc["entries"][0]["entry_hash"] = "00" * 32
+    new_bytes = json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":")).encode()
+    new_sha = hashlib.sha256(new_bytes).hexdigest()
+
+    private_raw = signing.generate_private_key()
+    public_raw = signing.raw_public_key_from_private(private_raw)
+    key_id = signing.key_id_for(public_raw)
+    block = signing.signature_block(
+        chain_head=doc["chain_head"], manifest_sha256=new_sha, key_id=key_id,
+        signed_at=locker_material["seal"]["signed_at"],
+    )
+    sig = signing.SoftwareSigner(private_raw, key_id).sign(block)
+    (good_locker / locker_mod.MANIFEST_NAME).write_bytes(new_bytes)
+    (good_locker / locker_mod.SIGNATURE_BLOCK_NAME).write_bytes(block)
+    (good_locker / locker_mod.SIGNATURE_NAME).write_bytes(sig)
+    (good_locker / locker_mod.PUBLIC_KEY_NAME).write_text(
+        signing.public_key_pem(public_raw))
+    seal = dict(locker_material["seal"], manifest_sha256=new_sha,
+                signing_key_id=key_id)
+    (good_locker / locker_mod.SEAL_NAME).write_bytes(json.dumps(seal).encode())
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    codes = [f.code for f in report.failures]
+    assert "entry_hash_mismatch" in codes
+    # The head still recomputes correctly — this is exactly the case
+    # chain_head_mismatch cannot catch.
+    assert "chain_head_mismatch" not in codes
+
+
 def test_seal_claim_disagreeing_with_manifest_fails(good_locker, locker_material):
     seal = dict(locker_material["seal"], entry_count=99)
     (good_locker / "seal.json").write_bytes(json.dumps(seal).encode())
@@ -400,6 +460,23 @@ def test_seal_claim_disagreeing_with_manifest_fails(good_locker, locker_material
 
     assert report.ok is False
     assert any(f.code == "seal_claim_mismatch" for f in report.failures)
+
+
+def test_run_id_is_sourced_from_the_manifest_not_the_unsigned_seal(
+        good_locker, locker_material):
+    """seal.json is unsigned. On a stage-1-to-6 short-circuit the report must
+    still name the run the *signed* manifest describes, not whatever an
+    attacker wrote in the header."""
+    seal = dict(locker_material["seal"], run_id="not-the-real-run")
+    (good_locker / locker_mod.SEAL_NAME).write_bytes(json.dumps(seal).encode())
+    bad = bytearray(locker_material["signature"])
+    bad[0] ^= 0xFF
+    (good_locker / locker_mod.SIGNATURE_NAME).write_bytes(bytes(bad))
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert [f.code for f in report.failures] == ["signature_invalid"]
+    assert report.run_id == locker_material["run_id"]
 
 
 def test_directory_and_zip_produce_identical_reports(good_locker, tmp_path):

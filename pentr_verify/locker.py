@@ -112,6 +112,12 @@ class Failure:
     message: str
     subject: str | None = None
 
+    def __post_init__(self) -> None:
+        # FAILURE_CODES is the wire contract Phase 5's viewer and every --json
+        # consumer switch on. Enforcing it here means an invented or misspelled
+        # code fails loudly at construction instead of shipping silently.
+        assert self.code in FAILURE_CODES, f"unregistered failure code: {self.code!r}"
+
     def to_dict(self) -> dict:
         return {"code": self.code, "message": self.message, "subject": self.subject}
 
@@ -348,6 +354,13 @@ def verify_locker(locker: Locker, *,
     manifest = _parse_json(manifest_bytes, MANIFEST_NAME)
     report.chain_head = manifest.get("chain_head")
     report.entry_count = len(manifest.get("entries") or [])
+    # Re-source the run id from the manifest. seal.json is an unsigned header,
+    # so the value read at stage 1 is attacker-controlled; stage 10 cross-checks
+    # it on a PASS, but a stage-3-to-6 short-circuit would otherwise print the
+    # attacker's run id back to the auditor.
+    run = manifest.get("run") or {}
+    if run.get("engagement_id") is not None:
+        report.run_id = str(run["engagement_id"])
 
     if manifest.get("version") != manifest_mod.VERSION:
         report.failures.append(Failure(
@@ -431,7 +444,6 @@ def verify_locker(locker: Locker, *,
         return report
 
     # --- Stage 6: genesis binds the run id (anti cross-run splicing) ---
-    run = manifest.get("run") or {}
     expected_genesis = hash_chain.genesis(str(run.get("engagement_id")))
     if expected_genesis != manifest.get("genesis"):
         report.failures.append(Failure(
