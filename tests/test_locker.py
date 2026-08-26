@@ -298,3 +298,69 @@ def test_directory_and_zip_produce_identical_reports(good_locker, tmp_path):
     zip_report = locker_mod.verify_locker(locker_mod.open_locker(zpath))
 
     assert dir_report.to_dict() == zip_report.to_dict()
+
+
+def test_manifest_entry_missing_required_field_raises_format_error(good_locker, locker_material):
+    """A manifest entry missing a required field is malformed, not tampered:
+    re-sign it (with a fresh keypair) so stages 1-6 genuinely pass, and confirm
+    stage 7 rejects it with LockerFormatError naming the missing field, rather
+    than crashing with a bare KeyError."""
+    doc = json.loads(locker_material["manifest_bytes"])
+    del doc["entries"][0]["size"]
+    new_bytes = json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":")).encode()
+    new_sha = hashlib.sha256(new_bytes).hexdigest()
+
+    private_raw = signing.generate_private_key()
+    public_raw = signing.raw_public_key_from_private(private_raw)
+    key_id = signing.key_id_for(public_raw)
+    signed_at = locker_material["seal"]["signed_at"]
+    block = signing.signature_block(
+        chain_head=doc["chain_head"], manifest_sha256=new_sha,
+        key_id=key_id, signed_at=signed_at,
+    )
+    sig = signing.SoftwareSigner(private_raw, key_id).sign(block)
+
+    (good_locker / "manifest.json").write_bytes(new_bytes)
+    (good_locker / "signature_block.json").write_bytes(block)
+    (good_locker / "signature.bin").write_bytes(sig)
+    (good_locker / "public_key.pem").write_text(signing.public_key_pem(public_raw))
+    seal = dict(locker_material["seal"], manifest_sha256=new_sha,
+                signing_key_id=key_id)
+    (good_locker / "seal.json").write_bytes(json.dumps(seal).encode())
+
+    with pytest.raises(locker_mod.LockerFormatError) as exc:
+        locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+    assert "size" in str(exc.value)
+
+
+def test_size_only_tamper_fails_size_not_hash(good_locker, locker_material):
+    """Forging only the manifest's size field (content untouched) must trip
+    blob_size_mismatch, not blob_hash_mismatch — a distinct tamper from
+    test_mutated_blob_byte_fails_naming_the_artifact, which forges content."""
+    sha = next(iter(locker_material["blobs"]))
+    doc = json.loads(locker_material["manifest_bytes"])
+    for e in doc["entries"]:
+        if e["sha256"] == sha:
+            e["size"] = e["size"] + 1
+    new_bytes = json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":")).encode()
+    new_sha = hashlib.sha256(new_bytes).hexdigest()
+    block = signing.signature_block(
+        chain_head=doc["chain_head"], manifest_sha256=new_sha,
+        key_id=locker_material["key_id"], signed_at=locker_material["seal"]["signed_at"],
+    )
+    sig = signing.SoftwareSigner(locker_material["private_raw"],
+                                 locker_material["key_id"]).sign(block)
+    (good_locker / "manifest.json").write_bytes(new_bytes)
+    (good_locker / "signature_block.json").write_bytes(block)
+    (good_locker / "signature.bin").write_bytes(sig)
+    seal = dict(locker_material["seal"], manifest_sha256=new_sha)
+    (good_locker / "seal.json").write_bytes(json.dumps(seal).encode())
+
+    report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+
+    assert report.ok is False
+    codes = {f.code for f in report.failures}
+    assert "blob_size_mismatch" in codes
+    assert "blob_hash_mismatch" not in codes

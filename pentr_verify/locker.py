@@ -40,6 +40,13 @@ ROOT_FILES = frozenset({
 })
 _ARTIFACT_MEMBER = re.compile(r"^artifacts/[0-9a-f]{64}$")
 
+# Fields verify_locker's stage 7 indexes directly (not via .get()) when
+# rebuilding EntryInput/EntryResult. A manifest entry missing any of these is
+# not tamper — it's a malformed locker — so it is rejected with
+# LockerFormatError before any indexing happens, rather than surfacing as a
+# raw KeyError.
+_REQUIRED_ENTRY_FIELDS = ("seq", "kind", "phase", "size", "sha256", "created_at")
+
 
 def _validate_member_name(name: str) -> None:
     """Validate that a member name is in the locker allowlist.
@@ -247,13 +254,17 @@ def verify_locker(locker: Locker, *,
     """Verify an exported locker offline. Never raises on tamper — returns a report.
 
     Raises LockerFormatError only when the input is not a readable locker at all
-    (missing files, bad JSON, unparseable key). That distinction is what lets the
-    CLI say "you gave me a broken path" (exit 2) rather than reporting tampering
-    (exit 1) for an operator error.
+    (missing files, bad JSON, unparseable key, or a manifest entry missing a
+    required field). That distinction is what lets the CLI say "you gave me a
+    broken path" (exit 2) rather than reporting tampering (exit 1) for an
+    operator error.
 
-    Stages short-circuit: if the signature does not verify there is no value in
-    enumerating a hundred blobs, so the report names the signature failure and
-    stops.
+    Stages 1-6 short-circuit: if the signature does not verify there is no value
+    in enumerating a hundred blobs, so the report names the signature failure and
+    stops. Stages 7-10 do the opposite and accumulate — once the locker is known
+    to be a well-formed, signed locker, every remaining check runs so an auditor
+    sees every problem (bad chain, missing blobs, smuggled blobs, a lying seal)
+    in one pass instead of fixing failures one at a time.
     """
     report = VerifyReport(ok=False, pinned=pinned_public_key is not None)
 
@@ -375,6 +386,13 @@ def verify_locker(locker: Locker, *,
     # the point, it is the step that proves the shipped chain algorithm
     # reproduces the sealed head, which is what an auditor is actually checking.
     raw_entries = manifest.get("entries") or []
+    for idx, e in enumerate(raw_entries):
+        missing = [f for f in _REQUIRED_ENTRY_FIELDS if f not in e]
+        if missing:
+            raise LockerFormatError(
+                f"{MANIFEST_NAME} entry {idx} is missing required field(s): "
+                f"{', '.join(missing)}"
+            )
     inputs = [
         EntryInput(
             seq=e["seq"], kind=e["kind"], phase=e["phase"], size=e["size"],
