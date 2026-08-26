@@ -60,14 +60,43 @@ def test_zip_with_traversal_member_is_rejected(tmp_path):
         locker_mod.open_locker(zpath)
 
 
-def test_zip_with_unexpected_member_name_is_rejected(tmp_path):
+def test_zip_with_unexpected_root_member_name_is_rejected(tmp_path):
     zpath = tmp_path / "odd.zip"
     with zipfile.ZipFile(zpath, "w") as zf:
-        zf.writestr("seal.json", "{}")
-        zf.writestr("artifacts/not-a-hash.txt", "x")
+        zf.writestr(locker_mod.SEAL_NAME, "{}")
+        zf.writestr("notes.txt", "x")
 
     with pytest.raises(locker_mod.LockerFormatError):
         locker_mod.open_locker(zpath)
+
+
+def test_zip_with_nested_artifact_path_is_rejected(tmp_path):
+    """No locker writer produces a nested artifacts path, and the directory
+    reader cannot see one, so the zip reader refuses it outright."""
+    zpath = tmp_path / "nested.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr(locker_mod.SEAL_NAME, "{}")
+        zf.writestr("artifacts/sub/thing.txt", "x")
+
+    with pytest.raises(locker_mod.LockerFormatError):
+        locker_mod.open_locker(zpath)
+
+
+def test_smuggled_artifact_is_unlisted_blob_in_both_containers(good_locker, tmp_path):
+    """The same tamper must get the same verdict from a directory and a zip.
+    A smuggled non-hex blob is evidence-not-sealed (exit 1), never "you gave me
+    a broken path" (exit 2) — and export only ever produces the zip form, so
+    the zip is the reading auditors actually get."""
+    (good_locker / "artifacts" / "secret.txt").write_bytes(b"not sealed")
+    zpath = _zip_from_dir(good_locker, tmp_path / "smuggled.zip")
+
+    dir_report = locker_mod.verify_locker(locker_mod.open_locker(good_locker))
+    zip_report = locker_mod.verify_locker(locker_mod.open_locker(zpath))
+
+    assert dir_report.to_dict() == zip_report.to_dict()
+    assert dir_report.ok is False
+    assert [f.code for f in dir_report.failures] == ["unlisted_blob"]
+    assert dir_report.failures[0].subject == "secret.txt"
 
 
 def test_zip_member_over_the_size_cap_is_rejected(tmp_path):

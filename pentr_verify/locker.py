@@ -42,6 +42,7 @@ ROOT_FILES = frozenset({
 # `\Z`, not `$`: `$` also matches just before a trailing newline, so
 # "artifacts/<64 hex>\n" would satisfy a guard written to reject it.
 _ARTIFACT_MEMBER = re.compile(r"^artifacts/[0-9a-f]{64}\Z")
+_PATH_SEPARATOR = re.compile(r"[\\/]")
 
 # Every member is read whole into memory, so each read is bounded by the same
 # per-artifact cap core.artifact_store.put enforces at seal time. No legitimate
@@ -58,6 +59,13 @@ MAX_MEMBER_BYTES = MAX_ARTIFACT_BYTES
 # LockerFormatError before any indexing happens, rather than surfacing as a
 # raw KeyError.
 _REQUIRED_ENTRY_FIELDS = ("seq", "kind", "phase", "size", "sha256", "created_at")
+
+
+def _escapes_locker_root(name: str) -> bool:
+    """True if a member name is absolute or walks out of the locker root."""
+    if name.startswith("/") or name.startswith("\\"):
+        return True
+    return ".." in _PATH_SEPARATOR.split(name)
 
 
 def _validate_member_name(name: str) -> None:
@@ -215,10 +223,25 @@ class _ZipLocker(Locker):
             raise LockerFormatError(f"not a readable zip: {path}") from exc
         self._names = {i.filename for i in self._zf.infolist() if not i.is_dir()}
         # Validate every member up front. Nothing is extracted to disk, but an
-        # unexpected name means this is not a locker we understand — and an
-        # absolute or traversing path is a hostile archive, not a typo.
+        # absolute or traversing path is a hostile archive, not a typo, and an
+        # unexpected *root* name means this is not a locker we understand.
+        #
+        # A flat artifacts/<anything> member is deliberately NOT rejected here,
+        # even when the name is not 64 hex: the directory reader can see such a
+        # file and stage 9 reports it as unlisted_blob (exit 1, "your evidence
+        # was tampered with"). Rejecting it at open time would make the same
+        # smuggled byte-for-byte tree exit 2 ("you gave me a broken path") in
+        # zip form — the more serious finding getting the less serious code, in
+        # the container auditors actually receive. read() still refuses the
+        # name (see _validate_member_name): stage 9 only lists it.
         for name in self._names:
-            if name in ROOT_FILES or _ARTIFACT_MEMBER.match(name):
+            if _escapes_locker_root(name):
+                raise LockerFormatError(
+                    f"hostile member path in locker zip: {name!r}")
+            if name in ROOT_FILES:
+                continue
+            rest = name[len("artifacts/"):] if name.startswith("artifacts/") else None
+            if rest is not None and rest and "/" not in rest:
                 continue
             raise LockerFormatError(f"unexpected member in locker zip: {name!r}")
 
