@@ -50,6 +50,17 @@ def test_nonexistent_path_exits_two(tmp_path, capsys):
     assert code == 2
 
 
+def test_format_error_raised_during_verification_exits_two(malformed_entry_locker,
+                                                           capsys):
+    """The subtlest path in the exit-code contract: a LockerFormatError raised
+    by verify_locker (not by open_locker) is still "this is not a locker I can
+    process" (exit 2), never "your evidence was tampered with" (exit 1)."""
+    code = cli.run([str(malformed_entry_locker)])
+
+    assert code == 2
+    assert "size" in capsys.readouterr().err
+
+
 def test_json_output_shape(good_locker, capsys):
     code = cli.run([str(good_locker), "--json"])
 

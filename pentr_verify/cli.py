@@ -11,7 +11,6 @@ import json
 import sys
 from pathlib import Path
 
-from core import signing
 from core.locker import LockerFormatError, VerifyReport, open_locker, verify_locker
 
 EXIT_PASS = 0
