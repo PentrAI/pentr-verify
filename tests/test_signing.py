@@ -109,6 +109,13 @@ def test_verify_returns_false_on_garbage_signature_length():
     assert signing.verify_signature(pub, b"block", b"too-short") is False
 
 
+def test_verify_returns_false_on_none_signature():
+    """run_seals.signature is nullable by design; a verifier reading an old,
+    pre-signing seal will call this with signature=None. That must not raise."""
+    _, pub = _keypair()
+    assert signing.verify_signature(pub, b"block", None) is False
+
+
 def test_public_key_pem_roundtrips():
     _, pub = _keypair()
     pem = signing.public_key_pem(pub)

@@ -119,10 +119,14 @@ def verify_signature(public_key_bytes: bytes, block_bytes: bytes,
     """Check a detached signature. Returns False on any failure; never raises.
 
     Phase 4's `pentr verify` is the main consumer; it runs offline against an
-    exported locker using this exact function.
+    exported locker using this exact function. `run_seals.signature` is
+    nullable by design (pre-signing seals have no signature block), so a
+    verifier reading an old seal WILL call this with `signature=None` — that
+    raises TypeError from the underlying library, not InvalidSignature, so it
+    must be caught here too.
     """
     try:
         Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature, block_bytes)
         return True
-    except (InvalidSignature, ValueError):
+    except (InvalidSignature, ValueError, TypeError):
         return False
