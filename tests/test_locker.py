@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 import zipfile
 
 import pytest
 
-from core import hash_chain, locker as locker_mod, signing
+from core import artifact_store, hash_chain, locker as locker_mod, signing
 from tests.conftest import _write_dir_locker, _zip_from_dir
 
 
@@ -67,6 +68,87 @@ def test_zip_with_unexpected_member_name_is_rejected(tmp_path):
 
     with pytest.raises(locker_mod.LockerFormatError):
         locker_mod.open_locker(zpath)
+
+
+def test_zip_member_over_the_size_cap_is_rejected(tmp_path):
+    """A zip bomb: 10 MiB + 1 of zeros deflates to a few KB. The reader must
+    refuse it before materialising it, or `pentr-verify` — the one component
+    pointed at files from untrusted parties — is a memory-exhaustion primitive."""
+    cap = artifact_store.MAX_ARTIFACT_BYTES
+    sha = "a" * 64
+    zpath = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(locker_mod.SEAL_NAME, "{}")
+        zf.writestr(f"artifacts/{sha}", b"\0" * (cap + 1))
+
+    lk = locker_mod.open_locker(zpath)
+
+    with pytest.raises(locker_mod.LockerFormatError) as exc:
+        lk.read_artifact(sha)
+    message = str(exc.value)
+    assert sha in message
+    assert str(cap) in message
+    assert str(cap + 1) in message
+
+
+def test_directory_member_over_the_size_cap_is_rejected(tmp_path):
+    cap = artifact_store.MAX_ARTIFACT_BYTES
+    sha = "b" * 64
+    root = _write_dir_locker(tmp_path / "loc", {locker_mod.SEAL_NAME: b"{}"},
+                             {sha: b"\0" * (cap + 1)})
+
+    lk = locker_mod.open_locker(root)
+
+    with pytest.raises(locker_mod.LockerFormatError) as exc:
+        lk.read_artifact(sha)
+    message = str(exc.value)
+    assert sha in message
+    assert str(cap) in message
+    assert str(cap + 1) in message
+
+
+def test_zip_member_with_lying_declared_size_is_rejected(tmp_path):
+    """The central directory's `file_size` is attacker-controlled, so the
+    header check alone is not a guard. Hand-patch it to understate the real
+    content and confirm the read still fails as a format error rather than
+    escaping as a raw BadZipFile (which the CLI would surface as a traceback)."""
+    cap = artifact_store.MAX_ARTIFACT_BYTES
+    sha = "c" * 64
+    zpath = tmp_path / "liar.zip"
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(locker_mod.SEAL_NAME, "{}")
+        zf.writestr(f"artifacts/{sha}", b"\0" * (cap + 1))
+
+    raw = bytearray(zpath.read_bytes())
+    # structCentralDir: uncompressed size is a 4-byte LE field at offset 24 of
+    # each central-directory header.
+    idx = raw.find(b"PK\x01\x02", raw.find(f"artifacts/{sha}".encode()))
+    assert idx != -1
+    while struct.unpack("<L", raw[idx + 24:idx + 28])[0] != cap + 1:
+        idx = raw.find(b"PK\x01\x02", idx + 1)
+        assert idx != -1
+    raw[idx + 24:idx + 28] = struct.pack("<L", 100)
+    zpath.write_bytes(bytes(raw))
+
+    lk = locker_mod.open_locker(zpath)
+
+    with pytest.raises(locker_mod.LockerFormatError):
+        lk.read_artifact(sha)
+
+
+def test_artifact_member_name_with_trailing_newline_is_rejected(tmp_path):
+    """`$` also matches just before a trailing newline, so a guard written with
+    it accepts a name it was written to reject. The file is really created, so
+    the read would otherwise succeed rather than fail as "missing"."""
+    smuggled = "d" * 64 + "\n"
+    root = _write_dir_locker(tmp_path / "loc", {locker_mod.SEAL_NAME: b"{}"},
+                             {smuggled: b"payload"})
+    lk = locker_mod.open_locker(root)
+    assert (root / "artifacts" / smuggled).is_file()
+
+    with pytest.raises(locker_mod.LockerFormatError) as exc:
+        lk.read_artifact(smuggled)
+    assert "not a valid locker member" in str(exc.value)
 
 
 def test_directory_locker_rejects_traversal_members(tmp_path):

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core import hash_chain, manifest as manifest_mod, signing
+from core.artifact_store import MAX_ARTIFACT_BYTES
 from core.hash_chain import EntryInput
 
 # The locker *packaging* format version, independent of core.manifest.VERSION
@@ -38,7 +39,18 @@ ROOT_FILES = frozenset({
     MANIFEST_NAME, SIGNATURE_BLOCK_NAME, SIGNATURE_NAME,
     PUBLIC_KEY_NAME, SEAL_NAME, README_NAME,
 })
-_ARTIFACT_MEMBER = re.compile(r"^artifacts/[0-9a-f]{64}$")
+# `\Z`, not `$`: `$` also matches just before a trailing newline, so
+# "artifacts/<64 hex>\n" would satisfy a guard written to reject it.
+_ARTIFACT_MEMBER = re.compile(r"^artifacts/[0-9a-f]{64}\Z")
+
+# Every member is read whole into memory, so each read is bounded by the same
+# per-artifact cap core.artifact_store.put enforces at seal time. No legitimate
+# locker is affected: manifest.json, the signature block and every blob are all
+# stored through that function, so none of them can exceed it. Without the cap,
+# a signed locker can be recompressed with one member as a zip bomb -- the
+# signature covers the manifest, not the compressed blob -- and pentr-verify is
+# precisely the component designed to be pointed at files from untrusted parties.
+MAX_MEMBER_BYTES = MAX_ARTIFACT_BYTES
 
 # Fields verify_locker's stage 7 indexes directly (not via .get()) when
 # rebuilding EntryInput/EntryResult. A manifest entry missing any of these is
@@ -174,6 +186,12 @@ class _DirLocker(Locker):
         path = self._root / name
         if not path.is_file():
             raise LockerFormatError(f"locker is missing {name}")
+        size = path.stat().st_size
+        if size > MAX_MEMBER_BYTES:
+            raise LockerFormatError(
+                f"{name} is {size} bytes, above the {MAX_MEMBER_BYTES}-byte "
+                f"per-member cap; refusing to read it"
+            )
         return path.read_bytes()
 
     def list_artifact_names(self) -> set[str]:
@@ -207,7 +225,28 @@ class _ZipLocker(Locker):
     def _read_member(self, name: str) -> bytes:
         if name not in self._names:
             raise LockerFormatError(f"locker is missing {name}")
-        return self._zf.read(name)
+        declared = self._zf.getinfo(name).file_size
+        if declared > MAX_MEMBER_BYTES:
+            raise LockerFormatError(
+                f"{name} declares {declared} bytes, above the "
+                f"{MAX_MEMBER_BYTES}-byte per-member cap; refusing to read it"
+            )
+        # The declared size lives in the central directory and is entirely
+        # attacker-controlled, so the header check above is not on its own a
+        # guard: read through a bounded stream as well and never ask for more
+        # than the cap plus one byte.
+        try:
+            with self._zf.open(name) as fh:
+                data = fh.read(MAX_MEMBER_BYTES + 1)
+        except (zipfile.BadZipFile, EOFError, OSError) as exc:
+            raise LockerFormatError(
+                f"{name} is not readable in this zip: {exc}") from exc
+        if len(data) > MAX_MEMBER_BYTES:
+            raise LockerFormatError(
+                f"{name} expands past the {MAX_MEMBER_BYTES}-byte per-member cap "
+                f"(it declared {declared} bytes); refusing to read it"
+            )
+        return data
 
     def list_artifact_names(self) -> set[str]:
         return {n.split("/", 1)[1] for n in self._names if n.startswith("artifacts/")}
