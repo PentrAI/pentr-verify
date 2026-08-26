@@ -12,6 +12,13 @@ import re
 import zipfile
 from pathlib import Path
 
+# The locker *packaging* format version, independent of core.manifest.VERSION
+# and core.signing.SIGNATURE_VERSION even though all three read "pentr-locker-1"
+# today. These are three separately-versioned concerns that happened to ship
+# together in Phase 4: the manifest schema, the signature block schema, and the
+# container format. Aliasing to either would mean bumping the schema version
+# silently changes what the locker advertises, making them unable to move
+# independently.
 LOCKER_FORMAT = "pentr-locker-1"
 
 MANIFEST_NAME = "manifest.json"
@@ -26,6 +33,18 @@ ROOT_FILES = frozenset({
     PUBLIC_KEY_NAME, SEAL_NAME, README_NAME,
 })
 _ARTIFACT_MEMBER = re.compile(r"^artifacts/[0-9a-f]{64}$")
+
+
+def _validate_member_name(name: str) -> None:
+    """Validate that a member name is in the locker allowlist.
+
+    Raises LockerFormatError if the name is not one of the root files or a
+    valid artifact path. This guards against path traversal attacks and
+    unexpected members.
+    """
+    if name in ROOT_FILES or _ARTIFACT_MEMBER.match(name):
+        return
+    raise LockerFormatError(f"not a valid locker member: {name!r}")
 
 
 class LockerFormatError(Exception):
@@ -43,6 +62,17 @@ class Locker:
         self.source = source
 
     def read(self, name: str) -> bytes:
+        """Read a locker member by name.
+
+        Validates that the name is in the allowlist (root files or artifacts)
+        before delegating to the backend, guarding against path traversal
+        attacks in both directory and zip lockers.
+        """
+        _validate_member_name(name)
+        return self._read_member(name)
+
+    def _read_member(self, name: str) -> bytes:
+        """Read a locker member (implemented by subclasses)."""
         raise NotImplementedError
 
     def list_artifact_names(self) -> set[str]:
@@ -57,13 +87,18 @@ class _DirLocker(Locker):
         super().__init__(str(root))
         self._root = root
 
-    def read(self, name: str) -> bytes:
+    def _read_member(self, name: str) -> bytes:
         path = self._root / name
         if not path.is_file():
             raise LockerFormatError(f"locker is missing {name}")
         return path.read_bytes()
 
     def list_artifact_names(self) -> set[str]:
+        # Deliberately does not filter by hex name. Stage 9 of verify_locker
+        # must be able to see a smuggled file (e.g., artifacts/secret.txt) in
+        # order to fail on it as unlisted_blob. If we filtered here, a smuggled
+        # file would be invisible and the locker would pass, silently breaking
+        # the strict both-way check.
         adir = self._root / "artifacts"
         if not adir.is_dir():
             return set()
@@ -86,7 +121,7 @@ class _ZipLocker(Locker):
                 continue
             raise LockerFormatError(f"unexpected member in locker zip: {name!r}")
 
-    def read(self, name: str) -> bytes:
+    def _read_member(self, name: str) -> bytes:
         if name not in self._names:
             raise LockerFormatError(f"locker is missing {name}")
         return self._zf.read(name)

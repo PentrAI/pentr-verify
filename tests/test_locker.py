@@ -66,3 +66,12 @@ def test_zip_with_unexpected_member_name_is_rejected(tmp_path):
 
     with pytest.raises(locker_mod.LockerFormatError):
         locker_mod.open_locker(zpath)
+
+
+def test_directory_locker_rejects_traversal_members(tmp_path):
+    root = _write_dir_locker(tmp_path / "loc", {"seal.json": b"{}"}, {})
+    lk = locker_mod.open_locker(root)
+
+    with pytest.raises(locker_mod.LockerFormatError) as exc:
+        lk.read("artifacts/../../etc/passwd")
+    assert "artifacts/../../etc/passwd" in str(exc.value)
