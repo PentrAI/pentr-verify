@@ -7,7 +7,8 @@ import zipfile
 
 import pytest
 
-from core import artifact_store, hash_chain, locker as locker_mod, signing
+from core import artifact_store, hash_chain, signing
+from core import locker as locker_mod
 from tests.conftest import _write_dir_locker, _zip_from_dir
 
 

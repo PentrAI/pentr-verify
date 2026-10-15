@@ -15,7 +15,8 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core import hash_chain, manifest as manifest_mod, signing
+from core import hash_chain, signing
+from core import manifest as manifest_mod
 from core.artifact_store import MAX_ARTIFACT_BYTES
 from core.hash_chain import EntryInput
 
@@ -479,7 +480,7 @@ def verify_locker(locker: Locker, *,
     recomputed, recomputed_head = hash_chain.compute_chain(
         str(run.get("engagement_id")), inputs
     )
-    for e, h in zip(raw_entries, recomputed):
+    for e, h in zip(raw_entries, recomputed, strict=True):
         if e.get("entry_hash") != h:
             report.failures.append(Failure(
                 "entry_hash_mismatch",
