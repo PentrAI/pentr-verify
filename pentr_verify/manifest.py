@@ -47,7 +47,7 @@ def build_manifest(*, run_id: str, engagement_id: str, framework: str,
                 "created_at": e.created_at,
                 "entry_hash": h,
             }
-            for e, h in zip(entries, entry_hashes)
+            for e, h in zip(entries, entry_hashes, strict=True)
         ],
         "chain_head": chain_head,
         "entry_count": len(entries),
