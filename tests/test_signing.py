@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from core import signing
+from pentr_verify import signing
 
 BLOCK_KWARGS = {
     "chain_head": "c" * 64,

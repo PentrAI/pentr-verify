@@ -7,8 +7,8 @@ import zipfile
 
 import pytest
 
-from core import artifact_store, hash_chain, signing
-from core import locker as locker_mod
+from pentr_verify import hash_chain, signing
+from pentr_verify import locker as locker_mod
 from tests.conftest import _write_dir_locker, _zip_from_dir
 
 
@@ -104,7 +104,7 @@ def test_zip_member_over_the_size_cap_is_rejected(tmp_path):
     """A zip bomb: 10 MiB + 1 of zeros deflates to a few KB. The reader must
     refuse it before materialising it, or `pentr-verify` — the one component
     pointed at files from untrusted parties — is a memory-exhaustion primitive."""
-    cap = artifact_store.MAX_ARTIFACT_BYTES
+    cap = locker_mod.MAX_MEMBER_BYTES
     sha = "a" * 64
     zpath = tmp_path / "bomb.zip"
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -122,7 +122,7 @@ def test_zip_member_over_the_size_cap_is_rejected(tmp_path):
 
 
 def test_directory_member_over_the_size_cap_is_rejected(tmp_path):
-    cap = artifact_store.MAX_ARTIFACT_BYTES
+    cap = locker_mod.MAX_MEMBER_BYTES
     sha = "b" * 64
     root = _write_dir_locker(tmp_path / "loc", {locker_mod.SEAL_NAME: b"{}"},
                              {sha: b"\0" * (cap + 1)})
@@ -142,7 +142,7 @@ def test_zip_member_with_lying_declared_size_is_rejected(tmp_path):
     header check alone is not a guard. Hand-patch it to understate the real
     content and confirm the read still fails as a format error rather than
     escaping as a raw BadZipFile (which the CLI would surface as a traceback)."""
-    cap = artifact_store.MAX_ARTIFACT_BYTES
+    cap = locker_mod.MAX_MEMBER_BYTES
     sha = "c" * 64
     zpath = tmp_path / "liar.zip"
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:

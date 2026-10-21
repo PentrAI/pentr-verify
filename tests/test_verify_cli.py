@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 
-from core import signing
-from verify import cli
+from pentr_verify import cli, signing
 
 
 def test_good_locker_exits_zero(good_locker, capsys):

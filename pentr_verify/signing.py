@@ -99,7 +99,7 @@ def signature_block(*, chain_head: str, manifest_sha256: str, key_id: str,
     Signing this block rather than the raw manifest binds the key identity and
     the seal time into the signed material: a signature cannot be replayed onto
     another manifest, and a mislabeled key_id is a detected failure rather than
-    a confusing one. Serialization rules match core/manifest.py exactly.
+    a confusing one. Serialization rules match pentr_verify/manifest.py exactly.
     """
     block = {
         "version": SIGNATURE_VERSION,

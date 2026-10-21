@@ -3,7 +3,7 @@
 PURE MODULE — imports nothing from server/, scheduler/, or SQLAlchemy. It must
 run on an auditor's machine that has never seen the Pentr database. Every hash
 here is recomputed with the exact same primitives that produced the seal
-(core.hash_chain, core.manifest, core.signing), which is what makes a PASS
+(pentr_verify.hash_chain, pentr_verify.manifest, pentr_verify.signing), which is what makes a PASS
 mean something: the verifier cannot drift from the sealer.
 """
 from __future__ import annotations
@@ -15,13 +15,12 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core import hash_chain, signing
-from core import manifest as manifest_mod
-from core.artifact_store import MAX_ARTIFACT_BYTES
-from core.hash_chain import EntryInput
+from pentr_verify import hash_chain, signing
+from pentr_verify import manifest as manifest_mod
+from pentr_verify.hash_chain import EntryInput
 
-# The locker *packaging* format version, independent of core.manifest.VERSION
-# and core.signing.SIGNATURE_VERSION even though all three read "pentr-locker-1"
+# The locker *packaging* format version, independent of pentr_verify.manifest.VERSION
+# and pentr_verify.signing.SIGNATURE_VERSION even though all three read "pentr-locker-1"
 # today. These are three separately-versioned concerns that happened to ship
 # together in Phase 4: the manifest schema, the signature block schema, and the
 # container format. Aliasing to either would mean bumping the schema version
@@ -46,13 +45,13 @@ _ARTIFACT_MEMBER = re.compile(r"^artifacts/[0-9a-f]{64}\Z")
 _PATH_SEPARATOR = re.compile(r"[\\/]")
 
 # Every member is read whole into memory, so each read is bounded by the same
-# per-artifact cap core.artifact_store.put enforces at seal time. No legitimate
-# locker is affected: manifest.json, the signature block and every blob are all
-# stored through that function, so none of them can exceed it. Without the cap,
+# per-artifact cap (10 MiB) the Pentr platform's artifact store enforces at seal
+# time. No legitimate locker is affected: manifest.json, the signature block and
+# every blob are all stored through that store, so none of them can exceed it. Without the cap,
 # a signed locker can be recompressed with one member as a zip bomb -- the
 # signature covers the manifest, not the compressed blob -- and pentr-verify is
 # precisely the component designed to be pointed at files from untrusted parties.
-MAX_MEMBER_BYTES = MAX_ARTIFACT_BYTES
+MAX_MEMBER_BYTES = 10 * 1024 * 1024
 
 # Fields verify_locker's stage 7 indexes directly (not via .get()) when
 # rebuilding EntryInput/EntryResult. A manifest entry missing any of these is

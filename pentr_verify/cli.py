@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from core.locker import LockerFormatError, VerifyReport, open_locker, verify_locker
+from pentr_verify.locker import LockerFormatError, VerifyReport, open_locker, verify_locker
 
 EXIT_PASS = 0
 EXIT_FAIL = 1

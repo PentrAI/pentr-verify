@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from core.hash_chain import EntryInput, compute_chain, genesis
+from pentr_verify.hash_chain import EntryInput, compute_chain, genesis
 
 VERSION = "pentr-locker-1"
 ALGORITHM = "sha256-linear-v1"

@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-from core.hash_chain import EntryInput, compute_chain
-from core.manifest import build_manifest, scope_digest
+from pentr_verify.hash_chain import EntryInput, compute_chain
+from pentr_verify.manifest import build_manifest, scope_digest
 
 
 def _entries():

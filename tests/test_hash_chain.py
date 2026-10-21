@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.hash_chain import EntryInput, compute_chain, genesis
+from pentr_verify.hash_chain import EntryInput, compute_chain, genesis
 
 
 def _entries():
