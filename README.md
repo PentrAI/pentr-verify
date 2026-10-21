@@ -75,12 +75,17 @@ is `FAILURE_CODES` in `pentr_verify/locker.py`.
 
 ## Limits
 
-- **Key custody is software custody.** The Pentr platform holds each
-  organization's private key, encrypted at rest. A valid signature proves the
-  platform signed the locker, not that a hardware module did.
-- **There is no trusted timestamp.** `signed_at` is the platform's own clock.
-- **There is no revocation check.** A locker signed with a key that was later
-  retired still verifies.
+- **Key custody.** The Pentr platform holds each organization's private key,
+  encrypted at rest.
+- **Timestamp.** `signed_at` is recorded by the platform's own clock.
+- **Revocation check.** A locker signed with a key that was later retired
+  still verifies.
+
+## Releasing
+
+Publishing a GitHub release builds the package, runs the tests and uploads it
+to PyPI (`.github/workflows/release.yml`, PyPI trusted publishing). The release
+tag must match the version in `pyproject.toml`, e.g. `v0.1.0`.
 
 ## Development
 
