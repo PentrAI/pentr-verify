@@ -14,9 +14,9 @@ checks the platform's own seal is built on.
 ## Install
 
 ```bash
-pipx install git+https://github.com/PentrAI/pentr-verify
+pipx install pentr-verify
 # or
-uv tool install git+https://github.com/PentrAI/pentr-verify
+uv tool install pentr-verify
 ```
 
 The only runtime dependency is `cryptography`. Python 3.12 or newer is required.
